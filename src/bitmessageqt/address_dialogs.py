@@ -1,29 +1,37 @@
+"""
+Dialogs that work with BM address.
+"""
+# pylint: disable=attribute-defined-outside-init,too-few-public-methods,relative-import
+
+import hashlib
+
 from PyQt4 import QtCore, QtGui
-from addresses import decodeAddress, encodeVarint, addBMIfNotPresent
-from account import (
-    GatewayAccount, MailchuckAccount, AccountMixin, accountClass,
-    getSortedAccounts
-)
-from tr import _translate
-from retranslateui import RetranslateMixin
-import widgets
 
 import queues
-import hashlib
+import widgets
+from account import AccountMixin, GatewayAccount, MailchuckAccount, accountClass, getSortedAccounts
+from addresses import addBMIfNotPresent, decodeAddress, encodeVarint
 from inventory import Inventory
+from tr import _translate
 
 
 class AddressCheckMixin(object):
+    """Base address validation class for QT UI"""
 
     def __init__(self):
         self.valid = False
-        QtCore.QObject.connect(self.lineEditAddress, QtCore.SIGNAL(
-            "textChanged(QString)"), self.addressChanged)
+        QtCore.QObject.connect(  # pylint: disable=no-member
+            self.lineEditAddress,
+            QtCore.SIGNAL("textChanged(QString)"),
+            self.addressChanged)
 
     def _onSuccess(self, addressVersion, streamNumber, ripe):
         pass
 
     def addressChanged(self, QString):
+        """
+        Address validation callback, performs validation and gives feedback
+        """
         status, addressVersion, streamNumber, ripe = decodeAddress(
             str(QString))
         self.valid = status == 'success'
@@ -71,11 +79,14 @@ class AddressCheckMixin(object):
 
 
 class AddressDataDialog(QtGui.QDialog, AddressCheckMixin):
+    """QDialog with Bitmessage address validation"""
+
     def __init__(self, parent):
         super(AddressDataDialog, self).__init__(parent)
         self.parent = parent
 
     def accept(self):
+        """Callback for QDIalog accepting value"""
         if self.valid:
             self.data = (
                 addBMIfNotPresent(str(self.lineEditAddress.text())),
@@ -89,7 +100,8 @@ class AddressDataDialog(QtGui.QDialog, AddressCheckMixin):
         super(AddressDataDialog, self).accept()
 
 
-class AddAddressDialog(AddressDataDialog, RetranslateMixin):
+class AddAddressDialog(AddressDataDialog):
+    """QDialog for adding a new address"""
 
     def __init__(self, parent=None, address=None):
         super(AddAddressDialog, self).__init__(parent)
@@ -99,7 +111,8 @@ class AddAddressDialog(AddressDataDialog, RetranslateMixin):
             self.lineEditAddress.setText(address)
 
 
-class NewAddressDialog(QtGui.QDialog, RetranslateMixin):
+class NewAddressDialog(QtGui.QDialog):
+    """QDialog for generating a new address"""
 
     def __init__(self, parent=None):
         super(NewAddressDialog, self).__init__(parent)
@@ -115,6 +128,7 @@ class NewAddressDialog(QtGui.QDialog, RetranslateMixin):
         self.show()
 
     def accept(self):
+        """accept callback"""
         self.hide()
         # self.buttonBox.enabled = False
         if self.radioButtonRandomAddress.isChecked():
@@ -159,7 +173,8 @@ class NewAddressDialog(QtGui.QDialog, RetranslateMixin):
                 ))
 
 
-class NewSubscriptionDialog(AddressDataDialog, RetranslateMixin):
+class NewSubscriptionDialog(AddressDataDialog):
+    """QDialog for subscribing to an address"""
 
     def __init__(self, parent=None):
         super(NewSubscriptionDialog, self).__init__(parent)
@@ -176,8 +191,8 @@ class NewSubscriptionDialog(AddressDataDialog, RetranslateMixin):
         else:
             Inventory().flush()
             doubleHashOfAddressData = hashlib.sha512(hashlib.sha512(
-                encodeVarint(addressVersion) +
-                encodeVarint(streamNumber) + ripe
+                encodeVarint(addressVersion)
+                + encodeVarint(streamNumber) + ripe
             ).digest()).digest()
             tag = doubleHashOfAddressData[32:]
             self.recent = Inventory().by_type_and_tag(3, tag)
@@ -201,7 +216,8 @@ class NewSubscriptionDialog(AddressDataDialog, RetranslateMixin):
                     ))
 
 
-class RegenerateAddressesDialog(QtGui.QDialog, RetranslateMixin):
+class RegenerateAddressesDialog(QtGui.QDialog):
+    """QDialog for regenerating deterministic addresses"""
     def __init__(self, parent=None):
         super(RegenerateAddressesDialog, self).__init__(parent)
         widgets.load('regenerateaddresses.ui', self)
@@ -209,7 +225,10 @@ class RegenerateAddressesDialog(QtGui.QDialog, RetranslateMixin):
         QtGui.QWidget.resize(self, QtGui.QWidget.sizeHint(self))
 
 
-class SpecialAddressBehaviorDialog(QtGui.QDialog, RetranslateMixin):
+class SpecialAddressBehaviorDialog(QtGui.QDialog):
+    """
+    QDialog for special address behaviour (e.g. mailing list functionality)
+    """
 
     def __init__(self, parent=None, config=None):
         super(SpecialAddressBehaviorDialog, self).__init__(parent)
@@ -237,11 +256,7 @@ class SpecialAddressBehaviorDialog(QtGui.QDialog, RetranslateMixin):
                     self.radioButtonBehaviorMailingList.click()
                 else:
                     self.radioButtonBehaveNormalAddress.click()
-                try:
-                    mailingListName = config.get(
-                        self.address, 'mailinglistname')
-                except:
-                    mailingListName = ''
+                mailingListName = config.safeGet(self.address, 'mailinglistname', '')
                 self.lineEditMailingListName.setText(
                     unicode(mailingListName, 'utf-8')
                 )
@@ -250,6 +265,7 @@ class SpecialAddressBehaviorDialog(QtGui.QDialog, RetranslateMixin):
         self.show()
 
     def accept(self):
+        """Accept callback"""
         self.hide()
         if self.address_is_chan:
             return
@@ -267,14 +283,15 @@ class SpecialAddressBehaviorDialog(QtGui.QDialog, RetranslateMixin):
             self.config.set(str(self.address), 'mailinglistname', str(
                 self.lineEditMailingListName.text().toUtf8()))
             self.parent.setCurrentItemColor(
-                QtGui.QColor(137, 04, 177))  # magenta
+                QtGui.QColor(137, 4, 177))  # magenta
         self.parent.rerenderComboBoxSendFrom()
         self.parent.rerenderComboBoxSendFromBroadcast()
         self.config.save()
         self.parent.rerenderMessagelistToLabels()
 
 
-class EmailGatewayDialog(QtGui.QDialog, RetranslateMixin):
+class EmailGatewayDialog(QtGui.QDialog):
+    """QDialog for email gateway control"""
     def __init__(self, parent, config=None, account=None):
         super(EmailGatewayDialog, self).__init__(parent)
         widgets.load('emailgateway.ui', self)
@@ -315,6 +332,7 @@ class EmailGatewayDialog(QtGui.QDialog, RetranslateMixin):
         QtGui.QWidget.resize(self, QtGui.QWidget.sizeHint(self))
 
     def accept(self):
+        """Accept callback"""
         self.hide()
         # no chans / mailinglists
         if self.acct.type != AccountMixin.NORMAL:

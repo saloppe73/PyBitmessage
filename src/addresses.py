@@ -1,20 +1,12 @@
+"""
+Operations with addresses
+"""
+# pylint: disable=redefined-outer-name,inconsistent-return-statements
 import hashlib
-from struct import pack, unpack
-from pyelliptic import arithmetic
 from binascii import hexlify, unhexlify
+from struct import pack, unpack
 
 from debug import logger
-
-
-# There is another copy of this function in Bitmessagemain.py
-def convertIntToString(n):
-    a = __builtins__.hex(n)
-    if a[-1:] == 'L':
-        a = a[:-1]
-    if (len(a) % 2) == 0:
-        return unhexlify(a[2:])
-    else:
-        return unhexlify('0'+a[2:])
 
 ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
@@ -22,16 +14,16 @@ ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 def encodeBase58(num, alphabet=ALPHABET):
     """Encode a number in Base X
 
-    `num`: The number to encode
-    `alphabet`: The alphabet to use for encoding
+    Args:
+      num: The number to encode
+      alphabet: The alphabet to use for encoding
     """
-    if (num == 0):
+    if num == 0:
         return alphabet[0]
     arr = []
     base = len(alphabet)
     while num:
         rem = num % base
-        # print 'num is:', num
         num = num // base
         arr.append(alphabet[rem])
     arr.reverse()
@@ -41,9 +33,9 @@ def encodeBase58(num, alphabet=ALPHABET):
 def decodeBase58(string, alphabet=ALPHABET):
     """Decode a Base X encoded string into the number
 
-    Arguments:
-    - `string`: The encoded string
-    - `alphabet`: The alphabet to use for encoding
+    Args:
+      string: The encoded string
+      alphabet: The alphabet to use for encoding
     """
     base = len(alphabet)
     num = 0
@@ -58,10 +50,20 @@ def decodeBase58(string, alphabet=ALPHABET):
     return num
 
 
+class varintEncodeError(Exception):
+    """Exception class for encoding varint"""
+    pass
+
+
+class varintDecodeError(Exception):
+    """Exception class for decoding varint data"""
+    pass
+
+
 def encodeVarint(integer):
+    """Convert integer into varint bytes"""
     if integer < 0:
-        logger.error('varint cannot be < 0')
-        raise SystemExit
+        raise varintEncodeError('varint cannot be < 0')
     if integer < 253:
         return pack('>B', integer)
     if integer >= 253 and integer < 65536:
@@ -71,12 +73,7 @@ def encodeVarint(integer):
     if integer >= 4294967296 and integer < 18446744073709551616:
         return pack('>B', 255) + pack('>Q', integer)
     if integer >= 18446744073709551616:
-        logger.error('varint cannot be >= 18446744073709551616')
-        raise SystemExit
-
-
-class varintDecodeError(Exception):
-    pass
+        raise varintEncodeError('varint cannot be >= 18446744073709551616')
 
 
 def decodeVarint(data):
@@ -87,7 +84,7 @@ def decodeVarint(data):
     Returns a tuple: (theEncodedValue, theSizeOfTheVarintInBytes)
     """
 
-    if len(data) == 0:
+    if not data:
         return (0, 0)
     firstByte, = unpack('>B', data[0:1])
     if firstByte < 253:
@@ -135,6 +132,7 @@ def decodeVarint(data):
 
 
 def calculateInventoryHash(data):
+    """Calculate inventory hash from object data"""
     sha = hashlib.new('sha512')
     sha2 = hashlib.new('sha512')
     sha.update(data)
@@ -143,6 +141,7 @@ def calculateInventoryHash(data):
 
 
 def encodeAddress(version, stream, ripe):
+    """Convert ripe to address"""
     if version >= 2 and version < 4:
         if len(ripe) != 20:
             raise Exception(
@@ -175,8 +174,12 @@ def encodeAddress(version, stream, ripe):
 
 
 def decodeAddress(address):
-    # returns (status, address version number, stream number,
-    # data (almost certainly a ripe hash))
+    """
+    returns (status, address version number, stream number,
+    data (almost certainly a ripe hash))
+    """
+    # pylint: disable=too-many-return-statements,too-many-statements
+    # pylint: disable=too-many-branches
 
     address = str(address).strip()
 
@@ -194,24 +197,18 @@ def decodeAddress(address):
     if len(hexdata) % 2 != 0:
         hexdata = '0' + hexdata
 
-    # print 'hexdata', hexdata
-
     data = unhexlify(hexdata)
     checksum = data[-4:]
 
     sha = hashlib.new('sha512')
     sha.update(data[:-4])
     currentHash = sha.digest()
-    # print 'sha after first hashing: ', sha.hexdigest()
     sha = hashlib.new('sha512')
     sha.update(currentHash)
-    # print 'sha after second hashing: ', sha.hexdigest()
 
     if checksum != sha.digest()[0:4]:
         status = 'checksumfailed'
         return status, 0, 0, ''
-    # else:
-    #    print 'checksum PASSED'
 
     try:
         addressVersionNumber, bytesUsedByVersionNumber = decodeVarint(data[:9])
@@ -219,8 +216,6 @@ def decodeAddress(address):
         logger.error(str(e))
         status = 'varintmalformed'
         return status, 0, 0, ''
-    # print 'addressVersionNumber', addressVersionNumber
-    # print 'bytesUsedByVersionNumber', bytesUsedByVersionNumber
 
     if addressVersionNumber > 4:
         logger.error('cannot decode address version numbers this high')
@@ -233,36 +228,35 @@ def decodeAddress(address):
 
     try:
         streamNumber, bytesUsedByStreamNumber = \
-          decodeVarint(data[bytesUsedByVersionNumber:])
+            decodeVarint(data[bytesUsedByVersionNumber:])
     except varintDecodeError as e:
         logger.error(str(e))
         status = 'varintmalformed'
         return status, 0, 0, ''
-    # print streamNumber
+
     status = 'success'
     if addressVersionNumber == 1:
         return status, addressVersionNumber, streamNumber, data[-24:-4]
     elif addressVersionNumber == 2 or addressVersionNumber == 3:
         embeddedRipeData = \
-          data[bytesUsedByVersionNumber + bytesUsedByStreamNumber:-4]
+            data[bytesUsedByVersionNumber + bytesUsedByStreamNumber:-4]
         if len(embeddedRipeData) == 19:
             return status, addressVersionNumber, streamNumber, \
-              '\x00'+embeddedRipeData
+                '\x00' + embeddedRipeData
         elif len(embeddedRipeData) == 20:
             return status, addressVersionNumber, streamNumber, \
-              embeddedRipeData
+                embeddedRipeData
         elif len(embeddedRipeData) == 18:
             return status, addressVersionNumber, streamNumber, \
-              '\x00\x00' + embeddedRipeData
+                '\x00\x00' + embeddedRipeData
         elif len(embeddedRipeData) < 18:
             return 'ripetooshort', 0, 0, ''
         elif len(embeddedRipeData) > 20:
             return 'ripetoolong', 0, 0, ''
-        else:
-            return 'otherproblem', 0, 0, ''
+        return 'otherproblem', 0, 0, ''
     elif addressVersionNumber == 4:
         embeddedRipeData = \
-          data[bytesUsedByVersionNumber + bytesUsedByStreamNumber:-4]
+            data[bytesUsedByVersionNumber + bytesUsedByStreamNumber:-4]
         if embeddedRipeData[0:1] == '\x00':
             # In order to enforce address non-malleability, encoded
             # RIPE data must have NULL bytes removed from the front
@@ -271,75 +265,12 @@ def decodeAddress(address):
             return 'ripetoolong', 0, 0, ''
         elif len(embeddedRipeData) < 4:
             return 'ripetooshort', 0, 0, ''
-        else:
-            x00string = '\x00' * (20 - len(embeddedRipeData))
-            return status, addressVersionNumber, streamNumber, \
-                x00string + embeddedRipeData
+        x00string = '\x00' * (20 - len(embeddedRipeData))
+        return status, addressVersionNumber, streamNumber, \
+            x00string + embeddedRipeData
 
 
 def addBMIfNotPresent(address):
+    """Prepend BM- to an address if it doesn't already have it"""
     address = str(address).strip()
     return address if address[:3] == 'BM-' else 'BM-' + address
-
-
-if __name__ == "__main__":
-    print(
-        '\nLet us make an address from scratch. Suppose we generate two'
-        ' random 32 byte values and call the first one the signing key'
-        ' and the second one the encryption key:'
-    )
-    privateSigningKey = \
-        '93d0b61371a54b53df143b954035d612f8efa8a3ed1cf842c2186bfd8f876665'
-    privateEncryptionKey = \
-        '4b0b73a54e19b059dc274ab69df095fe699f43b17397bca26fdf40f4d7400a3a'
-    print(
-        '\nprivateSigningKey = %s\nprivateEncryptionKey = %s' %
-        (privateSigningKey, privateEncryptionKey)
-    )
-    print(
-        '\nNow let us convert them to public keys by doing'
-        ' an elliptic curve point multiplication.'
-    )
-    publicSigningKey = arithmetic.privtopub(privateSigningKey)
-    publicEncryptionKey = arithmetic.privtopub(privateEncryptionKey)
-    print(
-        '\npublicSigningKey = %s\npublicEncryptionKey = %s' %
-        (publicSigningKey, publicEncryptionKey)
-    )
-
-    print(
-        '\nNotice that they both begin with the \\x04 which specifies'
-        ' the encoding type. This prefix is not send over the wire.'
-        ' You must strip if off before you send your public key across'
-        ' the wire, and you must add it back when you receive a public key.'
-    )
-
-    publicSigningKeyBinary = \
-        arithmetic.changebase(publicSigningKey, 16, 256, minlen=64)
-    publicEncryptionKeyBinary = \
-        arithmetic.changebase(publicEncryptionKey, 16, 256, minlen=64)
-
-    ripe = hashlib.new('ripemd160')
-    sha = hashlib.new('sha512')
-    sha.update(publicSigningKeyBinary + publicEncryptionKeyBinary)
-
-    ripe.update(sha.digest())
-    addressVersionNumber = 2
-    streamNumber = 1
-    print(
-        '\nRipe digest that we will encode in the address: %s' %
-        hexlify(ripe.digest())
-    )
-    returnedAddress = \
-        encodeAddress(addressVersionNumber, streamNumber, ripe.digest())
-    print('Encoded address: %s' % returnedAddress)
-    status, addressVersionNumber, streamNumber, data = \
-        decodeAddress(returnedAddress)
-    print(
-        '\nAfter decoding address:\n\tStatus: %s'
-        '\n\taddressVersionNumber %s'
-        '\n\tstreamNumber %s'
-        '\n\tlength of data (the ripe hash): %s'
-        '\n\tripe data: %s' %
-        (status, addressVersionNumber, streamNumber, len(data), hexlify(data))
-    )

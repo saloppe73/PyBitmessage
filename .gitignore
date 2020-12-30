@@ -10,10 +10,12 @@ src/.settings/
 src/**/.dll
 src/**/*.o
 src/**/*.so
+src/**/a.out
 build/lib.*
 build/temp.*
 dist
 *.egg-info
 docs/_*/*
 docs/autodoc/
+build
 pyan/

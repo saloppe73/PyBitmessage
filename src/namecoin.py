@@ -1,31 +1,7 @@
+"""
+Namecoin queries
+"""
 # pylint: disable=too-many-branches,protected-access
-"""
-Copyright (C) 2013 by Daniel Kraft <d@domob.eu>
-This file is part of the Bitmessage project.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-.. todo:: from debug import logger crashes PyBitmessage due to a circular dependency. The debug module will also
-override/disable logging.getLogger() # loggers so module level logging functions are used instead
-"""
-
-from __future__ import absolute_import
 
 import base64
 import httplib
@@ -34,10 +10,11 @@ import os
 import socket
 import sys
 
-import logging as logger
 import defaults
 import tr  # translate
+from addresses import decodeAddress
 from bmconfigparser import BMConfigParser
+from debug import logger
 
 
 configSection = "bitmessagesettings"
@@ -102,7 +79,10 @@ class namecoinConnection(object):
         """
         slashPos = string.find("/")
         if slashPos < 0:
+            display_name = string
             string = "id/" + string
+        else:
+            display_name = string.split("/")[1]
 
         try:
             if self.nmctype == "namecoind":
@@ -112,7 +92,9 @@ class namecoinConnection(object):
                 res = self.callRPC("data", ["getValue", string])
                 res = res["reply"]
                 if not res:
-                    return (tr._translate("MainWindow", 'The name %1 was not found.').arg(unicode(string)), None)
+                    return (tr._translate(
+                        "MainWindow", 'The name %1 was not found.'
+                    ).arg(unicode(string)), None)
             else:
                 assert False
         except RPCError as exc:
@@ -121,29 +103,37 @@ class namecoinConnection(object):
                 errmsg = exc.error["message"]
             else:
                 errmsg = exc.error
-            return (tr._translate("MainWindow", 'The namecoin query failed (%1)').arg(unicode(errmsg)), None)
+            return (tr._translate(
+                "MainWindow", 'The namecoin query failed (%1)'
+            ).arg(unicode(errmsg)), None)
+        except AssertionError:
+            return (tr._translate(
+                "MainWindow", 'Unknown namecoin interface type: %1'
+            ).arg(unicode(self.nmctype)), None)
         except Exception:
             logger.exception("Namecoin query exception")
-            return (tr._translate("MainWindow", 'The namecoin query failed.'), None)
+            return (tr._translate(
+                "MainWindow", 'The namecoin query failed.'), None)
 
         try:
-            val = json.loads(res)
-        except:
-            logger.exception("Namecoin query json exception")
-            return (tr._translate("MainWindow", 'The name %1 has no valid JSON data.').arg(unicode(string)), None)
+            res = json.loads(res)
+        except ValueError:
+            pass
+        else:
+            try:
+                display_name = res["name"]
+            except KeyError:
+                pass
+            res = res.get("bitmessage")
 
-        if "bitmessage" in val:
-            if "name" in val:
-                ret = "%s <%s>" % (val["name"], val["bitmessage"])
-            else:
-                ret = val["bitmessage"]
-            return (None, ret)
+        valid = decodeAddress(res)[0] == 'success'
         return (
+            None, "%s <%s>" % (display_name, res)
+        ) if valid else (
             tr._translate(
                 "MainWindow",
-                'The name %1 has no associated Bitmessage address.').arg(
-                    unicode(string)),
-            None)
+                'The name %1 has no associated Bitmessage address.'
+            ).arg(unicode(string)), None)
 
     def test(self):
         """
@@ -244,7 +234,7 @@ class namecoinConnection(object):
                 resp = self.con.getresponse()
                 result = resp.read()
                 if resp.status != 200:
-                    raise Exception("Namecoin returned status %i: %s" % resp.status, resp.reason)
+                    raise Exception("Namecoin returned status %i: %s" % (resp.status, resp.reason))
             except:
                 logger.info("HTTP receive error")
         except:
@@ -274,7 +264,7 @@ class namecoinConnection(object):
             return result
 
         except socket.error as exc:
-            raise Exception("Socket error in RPC connection: %s" % str(exc))
+            raise Exception("Socket error in RPC connection: %s" % exc)
 
 
 def lookupNamecoinFolder():
@@ -346,7 +336,7 @@ def ensureNamecoinOptions():
 
         nmc.close()
     except IOError:
-        logger.error("%s unreadable or missing, Namecoin support deactivated", nmcConfig)
+        logger.warning("%s unreadable or missing, Namecoin support deactivated", nmcConfig)
     except Exception:
         logger.warning("Error processing namecoin.conf", exc_info=True)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 """
-Check dependendies and give recommendations about how to satisfy them
+Check dependencies and give recommendations about how to satisfy them
 
 Limitations:
 
@@ -11,6 +11,7 @@ Limitations:
 """
 
 import os
+import sys
 from distutils.errors import CompileError
 try:
     from setuptools.dist import Distribution
@@ -21,7 +22,7 @@ try:
     from setup import EXTRAS_REQUIRE
 except ImportError:
     HAVE_SETUPTOOLS = False
-    EXTRAS_REQUIRE = []
+    EXTRAS_REQUIRE = {}
 
 from importlib import import_module
 
@@ -136,30 +137,37 @@ if prereqs:
 OPSYS = detectOS()
 CMD = PACKAGE_MANAGER[OPSYS] if OPSYS in PACKAGE_MANAGER else 'UNKNOWN_INSTALLER'
 for lhs, rhs in EXTRAS_REQUIRE.items():
+    if OPSYS is None:
+        break
     if rhs and any([
         EXTRAS_REQUIRE_DEPS[x][OPSYS]
         for x in rhs
         if x in EXTRAS_REQUIRE_DEPS
     ]):
-        rhs_cmd = ''.join([
-            CMD,
-            ' ',
-            ' '.join([
-                ''. join([
-                    xx for xx in EXTRAS_REQUIRE_DEPS[x][OPSYS]
-                ])
-                for x in rhs
-                if x in EXTRAS_REQUIRE_DEPS
-            ]),
-        ])
-        print(
-            "Optional dependency `pip install .[{}]` would require `{}`"
-            " to be run as root".format(lhs, rhs_cmd))
+        try:
+            import_module(lhs)
+        except Exception as e:
+            rhs_cmd = ''.join([
+                CMD,
+                ' ',
+                ' '.join([
+                    ''. join([
+                        xx for xx in EXTRAS_REQUIRE_DEPS[x][OPSYS]
+                    ])
+                    for x in rhs
+                    if x in EXTRAS_REQUIRE_DEPS
+                ]),
+            ])
+            print(
+                "Optional dependency `pip install .[{}]` would require `{}`"
+                " to be run as root".format(lhs, rhs_cmd))
 
 if (not compiler or prereqs) and OPSYS in PACKAGE_MANAGER:
     print("You can install the missing dependencies by running, as root:")
     if not compiler:
         compilerToPackages()
     prereqToPackages()
+    if prereqs and mandatory:
+        sys.exit(1)
 else:
     print("All the dependencies satisfied, you can install PyBitmessage")

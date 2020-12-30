@@ -1,4 +1,14 @@
-#!/usr/bin/python2.7
+"""
+Message encoding end decoding functions
+"""
+
+import string
+import zlib
+
+import messagetypes
+from bmconfigparser import BMConfigParser
+from debug import logger
+from tr import _translate
 
 try:
     import msgpack
@@ -7,14 +17,6 @@ except ImportError:
         import umsgpack as msgpack
     except ImportError:
         import fallback.umsgpack.umsgpack as msgpack
-import string
-import zlib
-
-from bmconfigparser import BMConfigParser
-from debug import logger
-import messagetypes
-from tr import _translate
-import helper_random
 
 BITMESSAGE_ENCODING_IGNORE = 0
 BITMESSAGE_ENCODING_TRIVIAL = 1
@@ -23,19 +25,24 @@ BITMESSAGE_ENCODING_EXTENDED = 3
 
 
 class MsgEncodeException(Exception):
+    """Exception during message encoding"""
     pass
 
 
 class MsgDecodeException(Exception):
+    """Exception during message decoding"""
     pass
 
 
 class DecompressionSizeException(MsgDecodeException):
+    # pylint: disable=super-init-not-called
+    """Decompression resulted in too much data (attack protection)"""
     def __init__(self, size):
         self.size = size
 
 
 class MsgEncode(object):
+    """Message encoder class"""
     def __init__(self, message, encoding=BITMESSAGE_ENCODING_SIMPLE):
         self.data = None
         self.encoding = encoding
@@ -50,6 +57,7 @@ class MsgEncode(object):
             raise MsgEncodeException("Unknown encoding %i" % (encoding))
 
     def encodeExtended(self, message):
+        """Handle extended encoding"""
         try:
             msgObj = messagetypes.message.Message()
             self.data = zlib.compress(msgpack.dumps(msgObj.encode(message)), 9)
@@ -62,31 +70,41 @@ class MsgEncode(object):
         self.length = len(self.data)
 
     def encodeSimple(self, message):
-        self.data = 'Subject:' + message['subject'] + '\n' + 'Body:' + message['body']
+        """Handle simple encoding"""
+        self.data = 'Subject:%(subject)s\nBody:%(body)s' % message
         self.length = len(self.data)
 
     def encodeTrivial(self, message):
+        """Handle trivial encoding"""
         self.data = message['body']
         self.length = len(self.data)
 
 
 class MsgDecode(object):
+    """Message decoder class"""
     def __init__(self, encoding, data):
         self.encoding = encoding
         if self.encoding == BITMESSAGE_ENCODING_EXTENDED:
             self.decodeExtended(data)
-        elif self.encoding in [BITMESSAGE_ENCODING_SIMPLE, BITMESSAGE_ENCODING_TRIVIAL]:
+        elif self.encoding in (
+                BITMESSAGE_ENCODING_SIMPLE, BITMESSAGE_ENCODING_TRIVIAL):
             self.decodeSimple(data)
         else:
-            self.body = _translate("MsgDecode", "The message has an unknown encoding.\nPerhaps you should upgrade Bitmessage.")
+            self.body = _translate(
+                "MsgDecode",
+                "The message has an unknown encoding.\n"
+                "Perhaps you should upgrade Bitmessage.")
             self.subject = _translate("MsgDecode", "Unknown encoding")
 
     def decodeExtended(self, data):
+        """Handle extended encoding"""
         dc = zlib.decompressobj()
         tmp = ""
         while len(tmp) <= BMConfigParser().safeGetInt("zlib", "maxsize"):
             try:
-                got = dc.decompress(data, BMConfigParser().safeGetInt("zlib", "maxsize") + 1 - len(tmp))
+                got = dc.decompress(
+                    data, BMConfigParser().safeGetInt("zlib", "maxsize") +
+                    1 - len(tmp))
                 # EOF
                 if got == "":
                     break
@@ -123,6 +141,7 @@ class MsgDecode(object):
             self.body = msgObj.body
 
     def decodeSimple(self, data):
+        """Handle simple encoding"""
         bodyPositionIndex = string.find(data, '\nBody:')
         if bodyPositionIndex > 1:
             subject = data[8:bodyPositionIndex]
@@ -138,23 +157,3 @@ class MsgDecode(object):
             subject = subject.splitlines()[0]
         self.subject = subject
         self.body = body
-
-if __name__ == '__main__':
-    messageData = {
-        "subject": ''.join(helper_random.randomchoice(string.ascii_lowercase + string.digits) for _ in range(40)),
-        "body": ''.join(helper_random.randomchoice(string.ascii_lowercase + string.digits) for _ in range(10000))
-    }
-    obj1 = MsgEncode(messageData, 1)
-    obj2 = MsgEncode(messageData, 2)
-    obj3 = MsgEncode(messageData, 3)
-    print "1:%i 2:%i 3:%i" %(len(obj1.data), len(obj2.data), len(obj3.data))
-
-    obj1e = MsgDecode(1, obj1.data)
-    # no subject in trivial encoding
-    assert messageData["body"] == obj1e.body
-    obj2e = MsgDecode(2, obj2.data)
-    assert messageData["subject"] == obj2e.subject
-    assert messageData["body"] == obj2e.body
-    obj3e = MsgDecode(3, obj3.data)
-    assert messageData["subject"] == obj3e.subject
-    assert messageData["body"] == obj3e.body

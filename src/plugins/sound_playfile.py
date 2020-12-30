@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-
+"""
+Sound notification plugin using external executable or winsound (on Windows)
+"""
 
 try:
     import winsound
 
     def connect_plugin(sound_file):
+        """Plugin's entry point"""
         winsound.PlaySound(sound_file, winsound.SND_FILENAME)
 except ImportError:
     import os
@@ -18,7 +21,8 @@ except ImportError:
             args, stdout=FNULL, stderr=subprocess.STDOUT, close_fds=True)
 
     def connect_plugin(sound_file):
-        global play_cmd
+        """This function implements the entry point."""
+        global play_cmd  # pylint: disable=global-statement
 
         ext = os.path.splitext(sound_file)[-1]
         try:

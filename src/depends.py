@@ -19,16 +19,16 @@ import os
 from importlib import import_module
 
 # We can now use logging so set up a simple configuration
-formatter = logging.Formatter(
-    '%(levelname)s: %(message)s'
-)
+formatter = logging.Formatter('%(levelname)s: %(message)s')
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(formatter)
 logger = logging.getLogger('both')
 logger.addHandler(handler)
 logger.setLevel(logging.ERROR)
 
+
 OS_RELEASE = {
+    "Debian GNU/Linux".lower(): "Debian",
     "fedora": "Fedora",
     "opensuse": "openSUSE",
     "ubuntu": "Ubuntu",
@@ -113,6 +113,7 @@ PACKAGES = {
 
 
 def detectOS():
+    """Finding out what Operating System is running"""
     if detectOS.result is not None:
         return detectOS.result
     if sys.platform.startswith('openbsd'):
@@ -132,12 +133,13 @@ detectOS.result = None
 
 
 def detectOSRelease():
+    """Detecting the release of OS"""
     with open("/etc/os-release", 'r') as osRelease:
         version = None
         for line in osRelease:
             if line.startswith("NAME="):
                 detectOS.result = OS_RELEASE.get(
-                    line.split("=")[-1].strip().lower())
+                    line.replace('"', '').split("=")[-1].strip().lower())
             elif line.startswith("VERSION_ID="):
                 try:
                     version = float(line.split("=")[1].replace("\"", ""))
@@ -148,6 +150,7 @@ def detectOSRelease():
 
 
 def try_import(module, log_extra=False):
+    """Try to import the non imported packages"""
     try:
         return import_module(module)
     except ImportError:
@@ -162,37 +165,13 @@ def try_import(module, log_extra=False):
         return False
 
 
-# We need to check hashlib for RIPEMD-160, as it won't be available
-# if OpenSSL is not linked against or the linked OpenSSL has RIPEMD
-# disabled.
-def check_hashlib():
-    """Do hashlib check.
-
-    The hashlib module check with version as if it included or not
-    in The Python Standard library, it's a module containing an
-    interface to the most popular hashing algorithms. hashlib
-    implements some of the algorithms, however if  OpenSSL
-    installed, hashlib is able to use this algorithms as well.
-    """
-    if sys.hexversion < 0x020500F0:
-        logger.error(
-            'The hashlib module is not included in this version of Python.')
-        return False
-    import hashlib
-    if '_hashlib' not in hashlib.__dict__:
-        logger.error(
-            'The RIPEMD-160 hash algorithm is not available.'
-            ' The hashlib module is not linked against OpenSSL.')
-        return False
+def check_ripemd160():
+    """Check availability of the RIPEMD160 hash function"""
     try:
-        hashlib.new('ripemd160')
-    except ValueError:
-        logger.error(
-            'The RIPEMD-160 hash algorithm is not available.'
-            ' The hashlib module utilizes an OpenSSL library with'
-            ' RIPEMD disabled.')
+        from fallback import RIPEMD160Hash  # pylint: disable=relative-import
+    except ImportError:
         return False
-    return True
+    return RIPEMD160Hash is not None
 
 
 def check_sqlite():
@@ -232,10 +211,8 @@ def check_sqlite():
                 ).fetchone()[0]
                 logger.info('SQLite Library Source ID: %s', sqlite_source_id)
             if sqlite_version_number >= 3006023:
-                compile_options = ', '.join(map(
-                    lambda row: row[0],
-                    conn.execute('PRAGMA compile_options;')
-                ))
+                compile_options = ', '.join(
+                    [row[0] for row in conn.execute('PRAGMA compile_options;')])
                 logger.info(
                     'SQLite Library Compile Options: %s', compile_options)
             # There is no specific version requirement as yet, so we just
@@ -260,7 +237,8 @@ def check_openssl():
     Here we are checking for openssl with its all dependent libraries
     and version checking.
     """
-
+    # pylint: disable=too-many-branches, too-many-return-statements
+    # pylint: disable=protected-access, redefined-outer-name
     ctypes = try_import('ctypes')
     if not ctypes:
         logger.error('Unable to check OpenSSL.')
@@ -324,7 +302,7 @@ def check_openssl():
                 ' ECDH, and ECDSA enabled.')
             return False
         matches = cflags_regex.findall(openssl_cflags)
-        if len(matches) > 0:
+        if matches:
             logger.error(
                 'This OpenSSL library is missing the following required'
                 ' features: %s. PyBitmessage requires OpenSSL 0.9.8b'
@@ -335,13 +313,13 @@ def check_openssl():
     return False
 
 
-# TODO: The minimum versions of pythondialog and dialog need to be determined
+# ..todo:: The minimum versions of pythondialog and dialog need to be determined
 def check_curses():
     """Do curses dependency check.
 
-    Here we are checking for curses if available or not with check
-    as interface requires the pythondialog\ package and the dialog
-    utility.
+    Here we are checking for curses if available or not with check as interface
+    requires the `pythondialog <https://pypi.org/project/pythondialog>`_ package
+    and the dialog utility.
     """
     if sys.hexversion < 0x20600F0:
         logger.error(
@@ -363,7 +341,7 @@ def check_curses():
     import subprocess
 
     try:
-        subprocess.check_call('which dialog')
+        subprocess.check_call(['which', 'dialog'])
     except subprocess.CalledProcessError:
         logger.error(
             'Curses requires the `dialog` command to be installed as well as'
@@ -446,7 +424,7 @@ def check_dependencies(verbose=False, optional=False):
             ' or greater is required.')
         has_all_dependencies = False
 
-    check_functions = [check_hashlib, check_sqlite, check_openssl]
+    check_functions = [check_ripemd160, check_sqlite, check_openssl]
     if optional:
         check_functions.extend([check_msgpack, check_pyqt, check_curses])
 
@@ -463,3 +441,6 @@ def check_dependencies(verbose=False, optional=False):
             'PyBitmessage cannot start. One or more dependencies are'
             ' unavailable.'
         )
+
+
+logger.setLevel(0)

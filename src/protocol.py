@@ -1,40 +1,41 @@
-# pylint: disable=too-many-boolean-expressions,too-many-return-statements,too-many-locals,too-many-statements
 """
-protocol.py
-===========
-
 Low-level protocol-related functions.
 """
-
-from __future__ import absolute_import
+# pylint: disable=too-many-boolean-expressions,too-many-return-statements
+# pylint: disable=too-many-locals,too-many-statements
 
 import base64
-from binascii import hexlify
 import hashlib
-import os
 import random
 import socket
-import ssl
-from struct import pack, unpack, Struct
 import sys
 import time
-import traceback
+from binascii import hexlify
+from struct import Struct, pack, unpack
 
 import defaults
 import highlevelcrypto
 import state
-from addresses import calculateInventoryHash, encodeVarint, decodeVarint, decodeAddress, varintDecodeError
+from addresses import (
+    encodeVarint, decodeVarint, decodeAddress, varintDecodeError)
 from bmconfigparser import BMConfigParser
 from debug import logger
+from fallback import RIPEMD160Hash
 from helper_sql import sqlExecute
-from inventory import Inventory
-from queues import objectProcessorQueue
 from version import softwareVersion
 
-
 # Service flags
+#: This is a normal network node
 NODE_NETWORK = 1
+#: This node supports SSL/TLS in the current connect (python < 2.7.9
+#: only supports an SSL client, so in that case it would only have this
+#: on when the connection is a client).
 NODE_SSL = 2
+# (Proposal) This node may do PoW on behalf of some its peers
+# (PoW offloading/delegating), but it doesn't have to. Clients may have
+# to meet additional requirements (e.g. TLS authentication)
+# NODE_POW = 4
+#: Node supports dandelion
 NODE_DANDELION = 8
 
 # Bitfield flags
@@ -50,6 +51,7 @@ OBJECT_GETPUBKEY = 0
 OBJECT_PUBKEY = 1
 OBJECT_MSG = 2
 OBJECT_BROADCAST = 3
+OBJECT_ONIONPEER = 0x746f72
 OBJECT_I2P = 0x493250
 OBJECT_ADDR = 0x61646472
 
@@ -95,7 +97,8 @@ def isBitSetWithinBitfield(fourByteString, n):
 def encodeHost(host):
     """Encode a given host to be used in low-level socket operations"""
     if host.find('.onion') > -1:
-        return '\xfd\x87\xd8\x7e\xeb\x43' + base64.b32decode(host.split(".")[0], True)
+        return '\xfd\x87\xd8\x7e\xeb\x43' + base64.b32decode(
+            host.split(".")[0], True)
     elif host.find(':') == -1:
         return '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF' + \
             socket.inet_aton(host)
@@ -111,8 +114,39 @@ def networkType(host):
     return 'IPv6'
 
 
+def network_group(host):
+    """Canonical identifier of network group
+       simplified, borrowed from
+       GetGroup() in src/netaddresses.cpp in bitcoin core"""
+    if not isinstance(host, str):
+        return None
+    network_type = networkType(host)
+    try:
+        raw_host = encodeHost(host)
+    except socket.error:
+        return host
+    if network_type == 'IPv4':
+        decoded_host = checkIPv4Address(raw_host[12:], True)
+        if decoded_host:
+            # /16 subnet
+            return raw_host[12:14]
+    elif network_type == 'IPv6':
+        decoded_host = checkIPv6Address(raw_host, True)
+        if decoded_host:
+            # /32 subnet
+            return raw_host[0:12]
+    else:
+        # just host, e.g. for tor
+        return host
+    # global network type group for local, private, unroutable
+    return network_type
+
+
 def checkIPAddress(host, private=False):
-    """Returns hostStandardFormat if it is a valid IP address, otherwise returns False"""
+    """
+    Returns hostStandardFormat if it is a valid IP address,
+    otherwise returns False
+    """
     if host[0:12] == '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF':
         hostStandardFormat = socket.inet_ntop(socket.AF_INET, host[12:])
         return checkIPv4Address(host[12:], hostStandardFormat, private)
@@ -128,35 +162,46 @@ def checkIPAddress(host, private=False):
         except ValueError:
             return False
         if hostStandardFormat == "":
-            # This can happen on Windows systems which are not 64-bit compatible
-            # so let us drop the IPv6 address.
+            # This can happen on Windows systems which are
+            # not 64-bit compatible so let us drop the IPv6 address.
             return False
         return checkIPv6Address(host, hostStandardFormat, private)
 
 
 def checkIPv4Address(host, hostStandardFormat, private=False):
-    """Returns hostStandardFormat if it is an IPv4 address, otherwise returns False"""
+    """
+    Returns hostStandardFormat if it is an IPv4 address,
+    otherwise returns False
+    """
     if host[0] == '\x7F':  # 127/8
         if not private:
-            logger.debug('Ignoring IP address in loopback range: %s', hostStandardFormat)
+            logger.debug(
+                'Ignoring IP address in loopback range: %s',
+                hostStandardFormat)
         return hostStandardFormat if private else False
     if host[0] == '\x0A':  # 10/8
         if not private:
-            logger.debug('Ignoring IP address in private range: %s', hostStandardFormat)
+            logger.debug(
+                'Ignoring IP address in private range: %s', hostStandardFormat)
         return hostStandardFormat if private else False
     if host[0:2] == '\xC0\xA8':  # 192.168/16
         if not private:
-            logger.debug('Ignoring IP address in private range: %s', hostStandardFormat)
+            logger.debug(
+                'Ignoring IP address in private range: %s', hostStandardFormat)
         return hostStandardFormat if private else False
     if host[0:2] >= '\xAC\x10' and host[0:2] < '\xAC\x20':  # 172.16/12
         if not private:
-            logger.debug('Ignoring IP address in private range: %s', hostStandardFormat)
+            logger.debug(
+                'Ignoring IP address in private range: %s', hostStandardFormat)
         return hostStandardFormat if private else False
     return False if private else hostStandardFormat
 
 
 def checkIPv6Address(host, hostStandardFormat, private=False):
-    """Returns hostStandardFormat if it is an IPv6 address, otherwise returns False"""
+    """
+    Returns hostStandardFormat if it is an IPv6 address,
+    otherwise returns False
+    """
     if host == ('\x00' * 15) + '\x01':
         if not private:
             logger.debug('Ignoring loopback address: %s', hostStandardFormat)
@@ -167,7 +212,8 @@ def checkIPv6Address(host, hostStandardFormat, private=False):
         return hostStandardFormat if private else False
     if (ord(host[0]) & 0xfe) == 0xfc:
         if not private:
-            logger.debug('Ignoring unique local address: %s', hostStandardFormat)
+            logger.debug(
+                'Ignoring unique local address: %s', hostStandardFormat)
         return hostStandardFormat if private else False
     return False if private else hostStandardFormat
 
@@ -188,28 +234,27 @@ def haveSSL(server=False):
 
 def checkSocksIP(host):
     """Predicate to check if we're using a SOCKS proxy"""
+    sockshostname = BMConfigParser().safeGet(
+        'bitmessagesettings', 'sockshostname')
     try:
-        if state.socksIP is None or not state.socksIP:
-            state.socksIP = socket.gethostbyname(BMConfigParser().get("bitmessagesettings", "sockshostname"))
-    # uninitialised
-    except NameError:
-        state.socksIP = socket.gethostbyname(BMConfigParser().get("bitmessagesettings", "sockshostname"))
-    # resolving failure
-    except socket.gaierror:
-        state.socksIP = BMConfigParser().get("bitmessagesettings", "sockshostname")
+        if not state.socksIP:
+            state.socksIP = socket.gethostbyname(sockshostname)
+    except NameError:  # uninitialised
+        state.socksIP = socket.gethostbyname(sockshostname)
+    except (TypeError, socket.gaierror):  # None, resolving failure
+        state.socksIP = sockshostname
     return state.socksIP == host
 
 
-def isProofOfWorkSufficient(data,
-                            nonceTrialsPerByte=0,
-                            payloadLengthExtraBytes=0,
-                            recvTime=0):
+def isProofOfWorkSufficient(
+        data, nonceTrialsPerByte=0, payloadLengthExtraBytes=0, recvTime=0):
     """
-    Validate an object's Proof of Work using method described in:
-        https://bitmessage.org/wiki/Proof_of_work
+    Validate an object's Proof of Work using method described
+    `here <https://bitmessage.org/wiki/Proof_of_work>`_
+
     Arguments:
-        int nonceTrialsPerByte (default: from default.py)
-        int payloadLengthExtraBytes (default: from default.py)
+        int nonceTrialsPerByte (default: from `.defaults`)
+        int payloadLengthExtraBytes (default: from `.defaults`)
         float recvTime (optional) UNIX epoch time when object was
           received from the network (default: current system time)
     Returns:
@@ -223,18 +268,20 @@ def isProofOfWorkSufficient(data,
     TTL = endOfLifeTime - (int(recvTime) if recvTime else int(time.time()))
     if TTL < 300:
         TTL = 300
-    POW, = unpack('>Q', hashlib.sha512(hashlib.sha512(data[
-        :8] + hashlib.sha512(data[8:]).digest()).digest()).digest()[0:8])
-    return POW <= 2 ** 64 / (nonceTrialsPerByte *
-                             (len(data) + payloadLengthExtraBytes +
-                              ((TTL * (len(data) + payloadLengthExtraBytes)) / (2 ** 16))))
+    POW, = unpack('>Q', hashlib.sha512(hashlib.sha512(
+        data[:8] + hashlib.sha512(data[8:]).digest()
+    ).digest()).digest()[0:8])
+    return POW <= 2 ** 64 / (
+        nonceTrialsPerByte * (
+            len(data) + payloadLengthExtraBytes +
+            ((TTL * (len(data) + payloadLengthExtraBytes)) / (2 ** 16))))
 
 
 # Packet creation
 
 
 def CreatePacket(command, payload=''):
-    """Construct and return a number of bytes from a payload"""
+    """Construct and return a packet"""
     payload_length = len(payload)
     checksum = hashlib.sha512(payload).digest()[0:4]
 
@@ -244,8 +291,13 @@ def CreatePacket(command, payload=''):
     return bytes(b)
 
 
-def assembleVersionMessage(remoteHost, remotePort, participatingStreams, server=False, nodeid=None):
-    """Construct the payload of a version message, return the resultng bytes of running CreatePacket() on it"""
+def assembleVersionMessage(
+    remoteHost, remotePort, participatingStreams, server=False, nodeid=None
+):
+    """
+    Construct the payload of a version message,
+    return the resulting bytes of running `CreatePacket` on it
+    """
     payload = ''
     payload += pack('>L', 3)  # protocol version.
     # bitflags of the services I offer.
@@ -257,13 +309,19 @@ def assembleVersionMessage(remoteHost, remotePort, participatingStreams, server=
     )
     payload += pack('>q', int(time.time()))
 
-    payload += pack(
-        '>q', 1)  # boolservices of remote connection; ignored by the remote host.
-    if checkSocksIP(remoteHost) and server:  # prevent leaking of tor outbound IP
+    # boolservices of remote connection; ignored by the remote host.
+    payload += pack('>q', 1)
+    if checkSocksIP(remoteHost) and server:
+        # prevent leaking of tor outbound IP
         payload += encodeHost('127.0.0.1')
         payload += pack('>H', 8444)
     else:
-        payload += encodeHost(remoteHost)
+        # use first 16 bytes if host data is longer
+        # for example in case of onion v3 service
+        try:
+            payload += encodeHost(remoteHost)[:16]
+        except socket.error:
+            payload += encodeHost('127.0.0.1')
         payload += pack('>H', remotePort)  # remote IPv6 and port
 
     # bitflags of the services I offer.
@@ -273,19 +331,26 @@ def assembleVersionMessage(remoteHost, remotePort, participatingStreams, server=
         (NODE_SSL if haveSSL(server) else 0) |
         (NODE_DANDELION if state.dandelion else 0)
     )
-    # = 127.0.0.1. This will be ignored by the remote host. The actual remote connected IP will be used.
-    payload += '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF' + pack('>L', 2130706433)
-    # we have a separate extPort and incoming over clearnet or outgoing through clearnet
-    if BMConfigParser().safeGetBoolean('bitmessagesettings', 'upnp') and state.extPort \
-        and ((server and not checkSocksIP(remoteHost)) or
-             (BMConfigParser().get("bitmessagesettings", "socksproxytype") == "none" and not server)):
-        payload += pack('>H', state.extPort)
+    # = 127.0.0.1. This will be ignored by the remote host.
+    # The actual remote connected IP will be used.
+    payload += '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF' + pack(
+        '>L', 2130706433)
+    # we have a separate extPort and incoming over clearnet
+    # or outgoing through clearnet
+    extport = BMConfigParser().safeGetInt('bitmessagesettings', 'extport')
+    if (
+        extport and ((server and not checkSocksIP(remoteHost)) or (
+            BMConfigParser().get('bitmessagesettings', 'socksproxytype')
+            == 'none' and not server))
+    ):
+        payload += pack('>H', extport)
     elif checkSocksIP(remoteHost) and server:  # incoming connection over Tor
-        payload += pack('>H', BMConfigParser().getint('bitmessagesettings', 'onionport'))
-    else:  # no extPort and not incoming over Tor
-        payload += pack('>H', BMConfigParser().getint('bitmessagesettings', 'port'))
+        payload += pack(
+            '>H', BMConfigParser().getint('bitmessagesettings', 'onionport'))
+    else:  # no extport and not incoming over Tor
+        payload += pack(
+            '>H', BMConfigParser().getint('bitmessagesettings', 'port'))
 
-    random.seed()
     if nodeid is not None:
         payload += nodeid[0:8]
     else:
@@ -308,7 +373,10 @@ def assembleVersionMessage(remoteHost, remotePort, participatingStreams, server=
 
 
 def assembleErrorMessage(fatal=0, banTime=0, inventoryVector='', errorText=''):
-    """Construct the payload of an error message, return the resultng bytes of running CreatePacket() on it"""
+    """
+    Construct the payload of an error message,
+    return the resulting bytes of running `CreatePacket` on it
+    """
     payload = encodeVarint(fatal)
     payload += encodeVarint(banTime)
     payload += encodeVarint(len(inventoryVector))
@@ -323,33 +391,41 @@ def assembleErrorMessage(fatal=0, banTime=0, inventoryVector='', errorText=''):
 
 def decryptAndCheckPubkeyPayload(data, address):
     """
-    Version 4 pubkeys are encrypted. This function is run when we already have the
-    address to which we want to try to send a message. The 'data' may come either
-    off of the wire or we might have had it already in our inventory when we tried
-    to send a msg to this particular address.
+    Version 4 pubkeys are encrypted. This function is run when we
+    already have the address to which we want to try to send a message.
+    The 'data' may come either off of the wire or we might have had it
+    already in our inventory when we tried to send a msg to this
+    particular address.
     """
-    # pylint: disable=unused-variable
     try:
-        status, addressVersion, streamNumber, ripe = decodeAddress(address)
+        addressVersion, streamNumber, ripe = decodeAddress(address)[1:]
 
         readPosition = 20  # bypass the nonce, time, and object type
-        embeddedAddressVersion, varintLength = decodeVarint(data[readPosition:readPosition + 10])
+        embeddedAddressVersion, varintLength = decodeVarint(
+            data[readPosition:readPosition + 10])
         readPosition += varintLength
-        embeddedStreamNumber, varintLength = decodeVarint(data[readPosition:readPosition + 10])
+        embeddedStreamNumber, varintLength = decodeVarint(
+            data[readPosition:readPosition + 10])
         readPosition += varintLength
-        # We'll store the address version and stream number (and some more) in the pubkeys table.
+        # We'll store the address version and stream number
+        # (and some more) in the pubkeys table.
         storedData = data[20:readPosition]
 
         if addressVersion != embeddedAddressVersion:
-            logger.info('Pubkey decryption was UNsuccessful due to address version mismatch.')
+            logger.info(
+                'Pubkey decryption was UNsuccessful'
+                ' due to address version mismatch.')
             return 'failed'
         if streamNumber != embeddedStreamNumber:
-            logger.info('Pubkey decryption was UNsuccessful due to stream number mismatch.')
+            logger.info(
+                'Pubkey decryption was UNsuccessful'
+                ' due to stream number mismatch.')
             return 'failed'
 
         tag = data[readPosition:readPosition + 32]
         readPosition += 32
-        # the time through the tag. More data is appended onto signedData below after the decryption.
+        # the time through the tag. More data is appended onto
+        # signedData below after the decryption.
         signedData = data[8:readPosition]
         encryptedData = data[readPosition:]
 
@@ -357,13 +433,15 @@ def decryptAndCheckPubkeyPayload(data, address):
         toAddress, cryptorObject = state.neededPubkeys[tag]
         if toAddress != address:
             logger.critical(
-                'decryptAndCheckPubkeyPayload failed due to toAddress mismatch.'
-                ' This is very peculiar. toAddress: %s, address %s',
-                toAddress,
-                address)
-            # the only way I can think that this could happen is if someone encodes their address data two different
-            # ways. That sort of address-malleability should have been caught by the UI or API and an error given to
-            # the user.
+                'decryptAndCheckPubkeyPayload failed due to toAddress'
+                ' mismatch. This is very peculiar.'
+                ' toAddress: %s, address %s',
+                toAddress, address
+            )
+            # the only way I can think that this could happen
+            # is if someone encodes their address data two different ways.
+            # That sort of address-malleability should have been caught
+            # by the UI or API and an error given to the user.
             return 'failed'
         try:
             decryptedData = cryptorObject.decrypt(encryptedData)
@@ -374,17 +452,17 @@ def decryptAndCheckPubkeyPayload(data, address):
             return 'failed'
 
         readPosition = 0
-        bitfieldBehaviors = decryptedData[readPosition:readPosition + 4]
+        # bitfieldBehaviors = decryptedData[readPosition:readPosition + 4]
         readPosition += 4
         publicSigningKey = '\x04' + decryptedData[readPosition:readPosition + 64]
         readPosition += 64
         publicEncryptionKey = '\x04' + decryptedData[readPosition:readPosition + 64]
         readPosition += 64
-        specifiedNonceTrialsPerByte, specifiedNonceTrialsPerByteLength = decodeVarint(
-            decryptedData[readPosition:readPosition + 10])
+        specifiedNonceTrialsPerByteLength = decodeVarint(
+            decryptedData[readPosition:readPosition + 10])[1]
         readPosition += specifiedNonceTrialsPerByteLength
-        specifiedPayloadLengthExtraBytes, specifiedPayloadLengthExtraBytesLength = decodeVarint(
-            decryptedData[readPosition:readPosition + 10])
+        specifiedPayloadLengthExtraBytesLength = decodeVarint(
+            decryptedData[readPosition:readPosition + 10])[1]
         readPosition += specifiedPayloadLengthExtraBytesLength
         storedData += decryptedData[:readPosition]
         signedData += decryptedData[:readPosition]
@@ -393,289 +471,49 @@ def decryptAndCheckPubkeyPayload(data, address):
         readPosition += signatureLengthLength
         signature = decryptedData[readPosition:readPosition + signatureLength]
 
-        if highlevelcrypto.verify(signedData, signature, hexlify(publicSigningKey)):
-            logger.info('ECDSA verify passed (within decryptAndCheckPubkeyPayload)')
-        else:
-            logger.info('ECDSA verify failed (within decryptAndCheckPubkeyPayload)')
+        if not highlevelcrypto.verify(
+                signedData, signature, hexlify(publicSigningKey)):
+            logger.info(
+                'ECDSA verify failed (within decryptAndCheckPubkeyPayload)')
             return 'failed'
+
+        logger.info(
+            'ECDSA verify passed (within decryptAndCheckPubkeyPayload)')
 
         sha = hashlib.new('sha512')
         sha.update(publicSigningKey + publicEncryptionKey)
-        ripeHasher = hashlib.new('ripemd160')
-        ripeHasher.update(sha.digest())
-        embeddedRipe = ripeHasher.digest()
+        embeddedRipe = RIPEMD160Hash(sha.digest()).digest()
 
         if embeddedRipe != ripe:
-            # Although this pubkey object had the tag were were looking for and was
-            # encrypted with the correct encryption key, it doesn't contain the
-            # correct pubkeys. Someone is either being malicious or using buggy software.
-            logger.info('Pubkey decryption was UNsuccessful due to RIPE mismatch.')
+            # Although this pubkey object had the tag were were looking for
+            # and was encrypted with the correct encryption key,
+            # it doesn't contain the correct pubkeys. Someone is
+            # either being malicious or using buggy software.
+            logger.info(
+                'Pubkey decryption was UNsuccessful due to RIPE mismatch.')
             return 'failed'
 
         # Everything checked out. Insert it into the pubkeys table.
 
         logger.info(
-            os.linesep.join([
-                'within decryptAndCheckPubkeyPayload,'
-                ' addressVersion: %s, streamNumber: %s' % addressVersion, streamNumber,
-                'ripe %s' % hexlify(ripe),
-                'publicSigningKey in hex: %s' % hexlify(publicSigningKey),
-                'publicEncryptionKey in hex: %s' % hexlify(publicEncryptionKey),
-            ])
+            'within decryptAndCheckPubkeyPayload, '
+            'addressVersion: %s, streamNumber: %s\nripe %s\n'
+            'publicSigningKey in hex: %s\npublicEncryptionKey in hex: %s',
+            addressVersion, streamNumber, hexlify(ripe),
+            hexlify(publicSigningKey), hexlify(publicEncryptionKey)
         )
 
         t = (address, addressVersion, storedData, int(time.time()), 'yes')
         sqlExecute('''INSERT INTO pubkeys VALUES (?,?,?,?,?)''', *t)
         return 'successful'
     except varintDecodeError:
-        logger.info('Pubkey decryption was UNsuccessful due to a malformed varint.')
-        return 'failed'
-    except Exception:
-        logger.critical(
-            'Pubkey decryption was UNsuccessful because of an unhandled exception! This is definitely a bug! \n%s',
-            traceback.format_exc())
-        return 'failed'
-
-
-def checkAndShareObjectWithPeers(data):
-    """
-    This function is called after either receiving an object off of the wire
-    or after receiving one as ackdata.
-    Returns the length of time that we should reserve to process this message
-    if we are receiving it off of the wire.
-    """
-    if len(data) > 2 ** 18:
-        logger.info('The payload length of this object is too large (%s bytes). Ignoring it.', len(data))
-        return 0
-    # Let us check to make sure that the proof of work is sufficient.
-    if not isProofOfWorkSufficient(data):
-        logger.info('Proof of work is insufficient.')
-        return 0
-
-    endOfLifeTime, = unpack('>Q', data[8:16])
-    # The TTL may not be larger than 28 days + 3 hours of wiggle room
-    if endOfLifeTime - int(time.time()) > 28 * 24 * 60 * 60 + 10800:
-        logger.info('This object\'s End of Life time is too far in the future. Ignoring it. Time is %s', endOfLifeTime)
-        return 0
-    if endOfLifeTime - int(time.time()) < - 3600:  # The EOL time was more than an hour ago. That's too much.
         logger.info(
-            'This object\'s End of Life time was more than an hour ago. Ignoring the object. Time is %s',
-            endOfLifeTime)
-        return 0
-    intObjectType, = unpack('>I', data[16:20])
-    try:
-        if intObjectType == 0:
-            _checkAndShareGetpubkeyWithPeers(data)
-            return 0.1
-        elif intObjectType == 1:
-            _checkAndSharePubkeyWithPeers(data)
-            return 0.1
-        elif intObjectType == 2:
-            _checkAndShareMsgWithPeers(data)
-            return 0.6
-        elif intObjectType == 3:
-            _checkAndShareBroadcastWithPeers(data)
-            return 0.6
-        _checkAndShareUndefinedObjectWithPeers(data)
-        return 0.6
-    except varintDecodeError as err:
-        logger.debug(
-            "There was a problem with a varint while checking to see whether it was appropriate to share an object"
-            " with peers. Some details: %s", err
-        )
+            'Pubkey decryption was UNsuccessful due to a malformed varint.')
+        return 'failed'
     except Exception:
         logger.critical(
-            'There was a problem while checking to see whether it was appropriate to share an object with peers.'
-            ' This is definitely a bug! %s%s' % os.linesep, traceback.format_exc()
+            'Pubkey decryption was UNsuccessful because of'
+            ' an unhandled exception! This is definitely a bug!',
+            exc_info=True
         )
-    return 0
-
-
-def _checkAndShareUndefinedObjectWithPeers(data):
-    # pylint: disable=unused-variable
-    embeddedTime, = unpack('>Q', data[8:16])
-    readPosition = 20  # bypass nonce, time, and object type
-    objectVersion, objectVersionLength = decodeVarint(
-        data[readPosition:readPosition + 9])
-    readPosition += objectVersionLength
-    streamNumber, streamNumberLength = decodeVarint(
-        data[readPosition:readPosition + 9])
-    if streamNumber not in state.streamsInWhichIAmParticipating:
-        logger.debug('The streamNumber %s isn\'t one we are interested in.', streamNumber)
-        return
-
-    inventoryHash = calculateInventoryHash(data)
-    if inventoryHash in Inventory():
-        logger.debug('We have already received this undefined object. Ignoring.')
-        return
-    objectType, = unpack('>I', data[16:20])
-    Inventory()[inventoryHash] = (
-        objectType, streamNumber, data, embeddedTime, '')
-    logger.debug('advertising inv with hash: %s', hexlify(inventoryHash))
-    broadcastToSendDataQueues((streamNumber, 'advertiseobject', inventoryHash))
-
-
-def _checkAndShareMsgWithPeers(data):
-    embeddedTime, = unpack('>Q', data[8:16])
-    readPosition = 20  # bypass nonce, time, and object type
-    objectVersion, objectVersionLength = decodeVarint(  # pylint: disable=unused-variable
-        data[readPosition:readPosition + 9])
-    readPosition += objectVersionLength
-    streamNumber, streamNumberLength = decodeVarint(
-        data[readPosition:readPosition + 9])
-    if streamNumber not in state.streamsInWhichIAmParticipating:
-        logger.debug('The streamNumber %s isn\'t one we are interested in.', streamNumber)
-        return
-    readPosition += streamNumberLength
-    inventoryHash = calculateInventoryHash(data)
-    if inventoryHash in Inventory():
-        logger.debug('We have already received this msg message. Ignoring.')
-        return
-    # This msg message is valid. Let's let our peers know about it.
-    objectType = 2
-    Inventory()[inventoryHash] = (
-        objectType, streamNumber, data, embeddedTime, '')
-    logger.debug('advertising inv with hash: %s', hexlify(inventoryHash))
-    broadcastToSendDataQueues((streamNumber, 'advertiseobject', inventoryHash))
-
-    # Now let's enqueue it to be processed ourselves.
-    objectProcessorQueue.put((objectType, data))
-
-
-def _checkAndShareGetpubkeyWithPeers(data):
-    # pylint: disable=unused-variable
-    if len(data) < 42:
-        logger.info('getpubkey message doesn\'t contain enough data. Ignoring.')
-        return
-    if len(data) > 200:
-        logger.info('getpubkey is abnormally long. Sanity check failed. Ignoring object.')
-    embeddedTime, = unpack('>Q', data[8:16])
-    readPosition = 20  # bypass the nonce, time, and object type
-    requestedAddressVersionNumber, addressVersionLength = decodeVarint(
-        data[readPosition:readPosition + 10])
-    readPosition += addressVersionLength
-    streamNumber, streamNumberLength = decodeVarint(
-        data[readPosition:readPosition + 10])
-    if streamNumber not in state.streamsInWhichIAmParticipating:
-        logger.debug('The streamNumber %s isn\'t one we are interested in.', streamNumber)
-        return
-    readPosition += streamNumberLength
-
-    inventoryHash = calculateInventoryHash(data)
-    if inventoryHash in Inventory():
-        logger.debug('We have already received this getpubkey request. Ignoring it.')
-        return
-
-    objectType = 0
-    Inventory()[inventoryHash] = (
-        objectType, streamNumber, data, embeddedTime, '')
-    # This getpubkey request is valid. Forward to peers.
-    logger.debug('advertising inv with hash: %s', hexlify(inventoryHash))
-    broadcastToSendDataQueues((streamNumber, 'advertiseobject', inventoryHash))
-
-    # Now let's queue it to be processed ourselves.
-    objectProcessorQueue.put((objectType, data))
-
-
-def _checkAndSharePubkeyWithPeers(data):
-    if len(data) < 146 or len(data) > 440:  # sanity check
-        return
-    embeddedTime, = unpack('>Q', data[8:16])
-    readPosition = 20  # bypass the nonce, time, and object type
-    addressVersion, varintLength = decodeVarint(
-        data[readPosition:readPosition + 10])
-    readPosition += varintLength
-    streamNumber, varintLength = decodeVarint(
-        data[readPosition:readPosition + 10])
-    readPosition += varintLength
-    if streamNumber not in state.streamsInWhichIAmParticipating:
-        logger.debug('The streamNumber %s isn\'t one we are interested in.', streamNumber)
-        return
-    if addressVersion >= 4:
-        tag = data[readPosition:readPosition + 32]
-        logger.debug('tag in received pubkey is: %s', hexlify(tag))
-    else:
-        tag = ''
-
-    inventoryHash = calculateInventoryHash(data)
-    if inventoryHash in Inventory():
-        logger.debug('We have already received this pubkey. Ignoring it.')
-        return
-    objectType = 1
-    Inventory()[inventoryHash] = (
-        objectType, streamNumber, data, embeddedTime, tag)
-    # This object is valid. Forward it to peers.
-    logger.debug('advertising inv with hash: %s', hexlify(inventoryHash))
-    broadcastToSendDataQueues((streamNumber, 'advertiseobject', inventoryHash))
-
-    # Now let's queue it to be processed ourselves.
-    objectProcessorQueue.put((objectType, data))
-
-
-def _checkAndShareBroadcastWithPeers(data):
-    if len(data) < 180:
-        logger.debug(
-            'The payload length of this broadcast packet is unreasonably low. '
-            'Someone is probably trying funny business. Ignoring message.')
-        return
-    embeddedTime, = unpack('>Q', data[8:16])
-    readPosition = 20  # bypass the nonce, time, and object type
-    broadcastVersion, broadcastVersionLength = decodeVarint(
-        data[readPosition:readPosition + 10])
-    readPosition += broadcastVersionLength
-    if broadcastVersion >= 2:
-        streamNumber, streamNumberLength = decodeVarint(data[readPosition:readPosition + 10])
-        readPosition += streamNumberLength
-        if streamNumber not in state.streamsInWhichIAmParticipating:
-            logger.debug('The streamNumber %s isn\'t one we are interested in.', streamNumber)
-            return
-    if broadcastVersion >= 3:
-        tag = data[readPosition:readPosition + 32]
-    else:
-        tag = ''
-    inventoryHash = calculateInventoryHash(data)
-    if inventoryHash in Inventory():
-        logger.debug('We have already received this broadcast object. Ignoring.')
-        return
-    # It is valid. Let's let our peers know about it.
-    objectType = 3
-    Inventory()[inventoryHash] = (
-        objectType, streamNumber, data, embeddedTime, tag)
-    # This object is valid. Forward it to peers.
-    logger.debug('advertising inv with hash: %s', hexlify(inventoryHash))
-    broadcastToSendDataQueues((streamNumber, 'advertiseobject', inventoryHash))
-
-    # Now let's queue it to be processed ourselves.
-    objectProcessorQueue.put((objectType, data))
-
-
-def broadcastToSendDataQueues(data):
-    """
-    If you want to command all of the sendDataThreads to do something, like shutdown or send some data, this
-    function puts your data into the queues for each of the sendDataThreads. The sendDataThreads are
-    responsible for putting their queue into (and out of) the sendDataQueues list.
-    """
-    for q in state.sendDataQueues:
-        q.put(data)
-
-
-# sslProtocolVersion
-if sys.version_info >= (2, 7, 13):
-    # this means TLSv1 or higher
-    # in the future change to
-    # ssl.PROTOCOL_TLS1.2
-    sslProtocolVersion = ssl.PROTOCOL_TLS  # pylint: disable=no-member
-elif sys.version_info >= (2, 7, 9):
-    # this means any SSL/TLS. SSLv2 and 3 are excluded with an option after context is created
-    sslProtocolVersion = ssl.PROTOCOL_SSLv23
-else:
-    # this means TLSv1, there is no way to set "TLSv1 or higher" or
-    # "TLSv1.2" in < 2.7.9
-    sslProtocolVersion = ssl.PROTOCOL_TLSv1
-
-
-# ciphers
-if ssl.OPENSSL_VERSION_NUMBER >= 0x10100000 and not ssl.OPENSSL_VERSION.startswith("LibreSSL"):
-    sslProtocolCiphers = "AECDH-AES256-SHA@SECLEVEL=0"
-else:
-    sslProtocolCiphers = "AECDH-AES256-SHA"
+        return 'failed'

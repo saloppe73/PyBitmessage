@@ -1,22 +1,24 @@
-import threading
-
-from bmconfigparser import BMConfigParser
-from debug import logger
-from helper_threading import StoppableThread
+"""
+A thread to handle network concerns
+"""
 import network.asyncore_pollchoose as asyncore
-from network.connectionpool import BMConnectionPool
 import state
+from network.connectionpool import BMConnectionPool
+from queues import excQueue
+from threads import StoppableThread
 
-class BMNetworkThread(threading.Thread, StoppableThread):
-    def __init__(self):
-        threading.Thread.__init__(self, name="Asyncore")
-        self.initStop()
-        self.name = "Asyncore"
-        logger.info("init asyncore thread")
+
+class BMNetworkThread(StoppableThread):
+    """Main network thread"""
+    name = "Asyncore"
 
     def run(self):
-        while not self._stopped and state.shutdown == 0:
-            BMConnectionPool().loop()
+        try:
+            while not self._stopped and state.shutdown == 0:
+                BMConnectionPool().loop()
+        except Exception as e:
+            excQueue.put((self.name, e))
+            raise
 
     def stopThread(self):
         super(BMNetworkThread, self).stopThread()
